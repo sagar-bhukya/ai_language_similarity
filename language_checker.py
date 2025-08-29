@@ -135,9 +135,11 @@ def cosine_similarity_percent(src_texts: List[str], tgt_texts: List[str]) -> Lis
     print(f"Similarity computation took {time.time() - start_time:.2f} seconds for {len(src_texts)} items. First 5 scores: {sims_list[:5]}")
     return sims_list
 
-def process_file(df: pd.DataFrame, output_path: str):
+@st.cache_data
+def process_file(_df: pd.DataFrame, output_path: str, file_hash: str):
     """Process the DataFrame in chunks and save to Excel."""
     start_time = time.time()
+    df = _df.copy()  # Avoid modifying cached input
     print(f"Input columns: {list(df.columns)}")
 
     pairs = find_pairs_by_position(df)
@@ -164,69 +166,92 @@ def process_file(df: pd.DataFrame, output_path: str):
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Sheet1")
     print(f"Total processing and save took {time.time() - start_time:.2f} seconds. Output: {output_path}")
+    return df, output_path
+
+# Initialize session state
+if 'processed_df' not in st.session_state:
+    st.session_state.processed_df = None
+if 'output_path' not in st.session_state:
+    st.session_state.output_path = None
+if 'file_hash' not in st.session_state:
+    st.session_state.file_hash = None
+if 'file_uploaded' not in st.session_state:
+    st.session_state.file_uploaded = None
 
 # Streamlit UI
 st.markdown("<div class='main-header'>Language Similarity Checker</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-header'>Upload an Excel file to compare English and translated text similarity.</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-header'>Upload an Excel file and click Submit to compare English and translated text similarity.</div>", unsafe_allow_html=True)
 
 with st.container():
-    st.write("**Instructions**: Upload an Excel file with columns 'Question', 'Option A', 'Option B', 'Option C', 'Option D' followed by their translations (e.g., 'Translated', 'Translated.1'). The app will compute similarity scores and add them as new columns.")
+    st.write("**Instructions**: Upload an Excel file with columns 'Question', 'Option A', 'Option B', 'Option C', 'Option D' followed by their translations (e.g., 'Translated', 'Translated.1'). Click Submit to process.")
     
     col1, col2 = st.columns([2, 1])
     with col1:
         uploaded_file = st.file_uploader("Choose an Excel file (.xlsx)", type=["xlsx"], help="File should contain English and translated columns in pairs.")
     
     if uploaded_file:
-        try:
-            with st.spinner("Processing your file..."):
-                start_time = time.time()
-                # Progress bar
-                progress_bar = st.progress(0)
-                progress_text = st.markdown("<div class='progress-text'>Starting...</div>", unsafe_allow_html=True)
+        # Store uploaded file in session state
+        st.session_state.file_uploaded = uploaded_file
+        st.session_state.file_hash = hash(uploaded_file.getvalue())
+        st.info("File uploaded. Click Submit to process.")
 
-                # Save uploaded file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-                    tmp.write(uploaded_file.read())
-                    tmp_path = tmp.name
+        # Submit button
+        if st.button("Submit", help="Process the uploaded file"):
+            try:
+                with st.spinner("Processing your file..."):
+                    start_time = time.time()
+                    progress_bar = st.progress(0)
+                    progress_text = st.markdown("<div class='progress-text'>Starting...</div>", unsafe_allow_html=True)
 
-                # Read and process
-                progress_text.markdown("<div class='progress-text'>Reading Excel file...</div>", unsafe_allow_html=True)
-                df = pd.read_excel(tmp_path, sheet_name=0)
-                progress_bar.progress(20)
+                    # Save uploaded file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+                        tmp.write(uploaded_file.read())
+                        tmp_path = tmp.name
 
-                output_path = os.path.join(tempfile.gettempdir(), f"processed_{uploaded_file.name}")
-                progress_text.markdown("<div class='progress-text'>Computing similarities...</div>", unsafe_allow_html=True)
-                process_file(df, output_path)
-                progress_bar.progress(80)
+                    # Read and process
+                    progress_text.markdown("<div class='progress-text'>Reading Excel file...</div>", unsafe_allow_html=True)
+                    df = pd.read_excel(tmp_path, sheet_name=0)
+                    progress_bar.progress(20)
 
-                # Display results
-                progress_text.markdown("<div class='progress-text'>Preparing output...</div>", unsafe_allow_html=True)
-                st.markdown("### Processed Data Preview")
-                st.dataframe(df.head(), use_container_width=True)
-                progress_bar.progress(100)
-                progress_text.markdown("<div class='progress-text'>Done!</div>", unsafe_allow_html=True)
+                    output_path = os.path.join(tempfile.gettempdir(), f"processed_{uploaded_file.name}")
+                    progress_text.markdown("<div class='progress-text'>Computing similarities...</div>", unsafe_allow_html=True)
+                    
+                    # Process file and cache result
+                    processed_df, output_path = process_file(df, output_path, st.session_state.file_hash)
+                    progress_bar.progress(80)
 
-                # Download button
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="Download Processed File",
-                        data=f,
-                        file_name=f"processed_{uploaded_file.name}",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        help="Download the Excel file with similarity scores."
-                    )
+                    # Store in session state
+                    st.session_state.processed_df = processed_df
+                    st.session_state.output_path = output_path
 
-                # Cleanup
-                os.remove(tmp_path)
-                print(f"Total request took {time.time() - start_time:.2f} seconds")
-                st.success("Processing complete! Download the file above.")
+                    # Cleanup
+                    os.remove(tmp_path)
+                    progress_bar.progress(100)
+                    progress_text.markdown("<div class='progress-text'>Done!</div>", unsafe_allow_html=True)
+                    print(f"Total request took {time.time() - start_time:.2f} seconds")
+                    st.success("Processing complete!")
 
-        except Exception as e:
-            print(f"Error occurred: {str(e)}")
-            if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            st.error(f"Processing failed: {str(e)}")
-            progress_bar.progress(0)
-            progress_text.markdown("<div class='progress-text'>Error occurred.</div>", unsafe_allow_html=True)
+            except Exception as e:
+                print(f"Error occurred: {str(e)}")
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                st.error(f"Processing failed: {str(e)}")
+                progress_bar.progress(0)
+                progress_text.markdown("<div class='progress-text'>Error occurred.</div>", unsafe_allow_html=True)
+
+    # Display results if available
+    if st.session_state.processed_df is not None:
+        st.markdown("### Processed Data Preview")
+        st.dataframe(st.session_state.processed_df.head(), use_container_width=True)
+
+        # Download button
+        with open(st.session_state.output_path, "rb") as f:
+            st.download_button(
+                label="Download Processed File",
+                data=f,
+                file_name=f"processed_{st.session_state.file_uploaded.name}",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                help="Download the Excel file with similarity scores."
+            )
 
 st.markdown("<hr><div style='text-align: center; color: #6B7280; font-size: 0.9em;'>Powered by Streamlit & Sentence Transformers</div>", unsafe_allow_html=True)
